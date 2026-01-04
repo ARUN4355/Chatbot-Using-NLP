@@ -18,7 +18,7 @@ CONFIDENCE_THRESHOLD = 0.55
 with open(INTENTS_FILE, "r", encoding="utf-8") as f:
     intents = json.load(f)
 
-# ================== TRAIN MODEL (ONCE) ==================
+# ================== TRAIN MODEL ==================
 @st.cache_resource
 def train_model():
     patterns = []
@@ -70,34 +70,25 @@ def chatbot_response(user_text):
 
     # 2️⃣ Predict intent
     vec = vectorizer.transform([user_text])
-    probs = model.predict_proba(vec)[0]
-    confidence = max(probs)
     tag = model.predict(vec)[0]
 
-    # 3️⃣ SYSTEM INTENTS → ALWAYS ANSWER
-    system_intents = ["greeting", "goodbye", "about_bot"]
-
-    if tag in system_intents:
-        for intent in intents:
-            if intent["tag"] == tag:
-                return random.choice(intent["responses"])
-
-    # 4️⃣ DOMAIN INTENTS → APPLY CONFIDENCE
-    if confidence < CONFIDENCE_THRESHOLD:
+    # 3️⃣ If fallback → learning mode
+    if tag == "fallback":
         st.session_state["awaiting_learning"] = clean_text
         return (
             "I’m not sure about this yet. "
             "If you know the correct answer, you can tell me and I’ll remember it."
         )
 
-    # 5️⃣ Normal intent response
+    # 4️⃣ Normal intent response (ALL intents work)
     for intent in intents:
         if intent["tag"] == tag:
             return random.choice(intent["responses"])
 
-    return "I currently focus on smart farming topics."
+    # 5️⃣ Safety fallback
+    return "I currently focus on smart farming topics." 
 
-# ================== LOG CONVERSATION ==================
+# ================== LOG CHAT ==================
 def log_chat(user, bot):
     if not os.path.exists("chat_log.csv"):
         with open("chat_log.csv", "w", newline="", encoding="utf-8") as f:
@@ -122,7 +113,7 @@ def main():
     if "awaiting_learning" not in st.session_state:
         st.session_state.awaiting_learning = None
 
-    # -------- CHAT PAGE --------
+    # -------- CHAT --------
     if choice == "Chat":
 
         use_voice = st.checkbox("🔊 Voice Reply")
@@ -145,7 +136,6 @@ def main():
         # -------- LEARNING MODE --------
         if st.session_state.awaiting_learning:
             st.info("🧠 Learning mode: Please provide the correct answer.")
-
             learned_answer = st.text_input("Your answer:")
 
             if st.button("Teach the bot"):
@@ -156,14 +146,12 @@ def main():
                 st.session_state.messages.append(
                     ("Bot", "Thank you! I have learned this and will remember it. ✅")
                 )
-
                 st.session_state.awaiting_learning = None
 
-        # -------- DISPLAY CHAT --------
         for sender, msg in st.session_state.messages:
             st.write(f"**{sender}:** {msg}")
 
-    # -------- HISTORY PAGE --------
+    # -------- HISTORY --------
     elif choice == "History":
         st.header("Conversation History")
         if os.path.exists("chat_log.csv"):
@@ -176,7 +164,7 @@ def main():
                     st.caption(row[2])
                     st.divider()
         else:
-            st.info("No history available.")
+            st.info("No history available.") 
 
     # -------- ABOUT PAGE -------- 
     elif choice == "About":

@@ -1,146 +1,184 @@
 import os
 import json
-import datetime
 import csv
 import random
-import nltk
-import ssl
+import datetime
 import streamlit as st
-import speech_recognition as sr
 import pyttsx3
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
-# Fix SSL certificate issue for nltk
-ssl._create_default_https_context = ssl._create_unverified_context
+# ================== CONFIG ==================
+INTENTS_FILE = "intents.json"
+LEARNED_FILE = "learned_knowledge.json"
+CONFIDENCE_THRESHOLD = 0.55
 
-# Download necessary nltk resources
-nltk.data.path.append(os.path.abspath("nltk_data"))
-nltk.download('punkt')
+# ================== LOAD INTENTS ==================
+with open(INTENTS_FILE, "r", encoding="utf-8") as f:
+    intents = json.load(f)
 
-# Load intents from JSON file
-file_path = os.path.abspath("intents.json")  # Ensure this file is in the same directory
-with open(file_path, "r", encoding="utf-8") as file:
-    intents = json.load(file)
+# ================== TRAIN MODEL (ONCE) ==================
+@st.cache_resource
+def train_model():
+    patterns = []
+    tags = []
 
-# Create the vectorizer and classifier
-vectorizer = TfidfVectorizer()
-clf = LogisticRegression(random_state=0, max_iter=10000)
-
-# Preprocess the data
-tags = []
-patterns = []
-for intent in intents:
-    for pattern in intent['patterns']:
-        tags.append(intent['tag'])
-        patterns.append(pattern)
-
-# Train the model
-x = vectorizer.fit_transform(patterns)
-y = tags
-clf.fit(x, y)
-
-# Function to speak chatbot responses (fixed)
-def speak(text):
-    engine = pyttsx3.init()  # Reinitialize engine inside the function
-    engine.say(text)
-    engine.runAndWait()
-
-# Function to recognize speech input
-def recognize_speech():
-    recognizer = sr.Recognizer()
-    with sr.Microphone() as source:
-        st.write("Listening...")
-        recognizer.adjust_for_ambient_noise(source)
-        try:
-            audio = recognizer.listen(source, timeout=5)
-            text = recognizer.recognize_google(audio)
-            return text
-        except sr.UnknownValueError:
-            return "Sorry, I couldn't understand that."
-        except sr.RequestError:
-            return "Speech recognition service is unavailable."
-
-# Function to generate chatbot response
-def chatbot(input_text):
-    input_text_vector = vectorizer.transform([input_text])
-    tag = clf.predict(input_text_vector)[0]
-    
     for intent in intents:
-        if intent['tag'] == tag:
-            return random.choice(intent['responses'])
-    
-    # If chatbot has no answer, ask user
-    return "I don't know the answer. Can you help me by providing one?"
+        for pattern in intent["patterns"]:
+            patterns.append(pattern)
+            tags.append(intent["tag"])
 
-# Function to log conversation
-def log_conversation(user_input, response):
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open("chat_log.csv", "a", newline="", encoding="utf-8") as csvfile:
-        csv_writer = csv.writer(csvfile)
-        csv_writer.writerow([user_input, response, timestamp])
+    vectorizer = TfidfVectorizer()
+    X = vectorizer.fit_transform(patterns)
 
-# Streamlit UI
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X, tags)
+
+    return vectorizer, model
+
+vectorizer, model = train_model()
+
+# ================== TEXT TO SPEECH ==================
+def speak(text):
+    try:
+        engine = pyttsx3.init()
+        engine.say(text)
+        engine.runAndWait()
+    except:
+        pass
+
+# ================== LEARNED KNOWLEDGE ==================
+def load_learned_data():
+    if not os.path.exists(LEARNED_FILE):
+        return {}
+    with open(LEARNED_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_learned_data(data):
+    with open(LEARNED_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+# ================== CHATBOT RESPONSE ==================
+def chatbot_response(user_text):
+    clean_text = user_text.strip().lower()
+
+    # 1️⃣ Learned knowledge first
+    learned_data = load_learned_data()
+    if clean_text in learned_data:
+        return learned_data[clean_text]
+
+    # 2️⃣ Predict intent
+    vec = vectorizer.transform([user_text])
+    probs = model.predict_proba(vec)[0]
+    confidence = max(probs)
+    tag = model.predict(vec)[0]
+
+    # 3️⃣ SYSTEM INTENTS → ALWAYS ANSWER
+    system_intents = ["greeting", "goodbye", "about_bot"]
+
+    if tag in system_intents:
+        for intent in intents:
+            if intent["tag"] == tag:
+                return random.choice(intent["responses"])
+
+    # 4️⃣ DOMAIN INTENTS → APPLY CONFIDENCE
+    if confidence < CONFIDENCE_THRESHOLD:
+        st.session_state["awaiting_learning"] = clean_text
+        return (
+            "I’m not sure about this yet. "
+            "If you know the correct answer, you can tell me and I’ll remember it."
+        )
+
+    # 5️⃣ Normal intent response
+    for intent in intents:
+        if intent["tag"] == tag:
+            return random.choice(intent["responses"])
+
+    return "I currently focus on smart farming topics."
+
+# ================== LOG CONVERSATION ==================
+def log_chat(user, bot):
+    if not os.path.exists("chat_log.csv"):
+        with open("chat_log.csv", "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["User", "Bot", "Time"])
+
+    with open("chat_log.csv", "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([user, bot, datetime.datetime.now()])
+
+# ================== STREAMLIT UI ==================
 def main():
-    st.title("Intent-Based Chatbot using NLP 🤖")
+    st.set_page_config(page_title="Smart Farming Chatbot", layout="centered")
+    st.title("🤖 Smart Farming Chatbot")
 
-    # Sidebar Menu
-    menu = ["Home", "Conversation History", "About"]
+    menu = ["Chat", "History", "About"]
     choice = st.sidebar.selectbox("Menu", menu)
 
-    if choice == "Home":
-        st.write("Welcome to the chatbot! Type or use voice input to chat.")
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-        if not os.path.exists("chat_log.csv"):
-            with open("chat_log.csv", "w", newline="", encoding="utf-8") as csvfile:
-                csv_writer = csv.writer(csvfile)
-                csv_writer.writerow(["User Input", "Chatbot Response", "Timestamp"])
+    if "awaiting_learning" not in st.session_state:
+        st.session_state.awaiting_learning = None
 
-        # Voice Toggle Button
-        use_voice = st.checkbox("🔊 Enable Voice Reply")
+    # -------- CHAT PAGE --------
+    if choice == "Chat":
 
-        # Chat interface (continuous chat like real messaging)
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
+        use_voice = st.checkbox("🔊 Voice Reply")
 
-        user_input = st.text_input("You:", key="user_input")
-        voice_input = st.button("🎙 Use Voice")
+        with st.form("chat_form", clear_on_submit=True):
+            user_input = st.text_input("You:")
+            submitted = st.form_submit_button("Send")
 
-        if voice_input:
-            user_input = recognize_speech()
+        if submitted and user_input:
+            bot_reply = chatbot_response(user_input)
 
-        if user_input:
-            response = chatbot(user_input)
             st.session_state.messages.append(("You", user_input))
-            st.session_state.messages.append(("Chatbot", response))
+            st.session_state.messages.append(("Bot", bot_reply))
 
-            # Display chat history
-            for sender, message in st.session_state.messages:
-                st.text(f"{sender}: {message}")
-
-            log_conversation(user_input, response)
+            log_chat(user_input, bot_reply)
 
             if use_voice:
-                speak(response)  # Speak response only if enabled
+                speak(bot_reply)
 
-            if response.lower() in ["goodbye", "bye"]:
-                st.write("Thank you for chatting! Have a great day!")
-                st.stop()
+        # -------- LEARNING MODE --------
+        if st.session_state.awaiting_learning:
+            st.info("🧠 Learning mode: Please provide the correct answer.")
 
-    elif choice == "Conversation History":
+            learned_answer = st.text_input("Your answer:")
+
+            if st.button("Teach the bot"):
+                data = load_learned_data()
+                data[st.session_state.awaiting_learning] = learned_answer
+                save_learned_data(data)
+
+                st.session_state.messages.append(
+                    ("Bot", "Thank you! I have learned this and will remember it. ✅")
+                )
+
+                st.session_state.awaiting_learning = None
+
+        # -------- DISPLAY CHAT --------
+        for sender, msg in st.session_state.messages:
+            st.write(f"**{sender}:** {msg}")
+
+    # -------- HISTORY PAGE --------
+    elif choice == "History":
         st.header("Conversation History")
-        try:
-            with open("chat_log.csv", "r", encoding="utf-8") as csvfile:
-                csv_reader = csv.reader(csvfile)
-                next(csv_reader)  # Skip header
-                for row in csv_reader:
-                    st.text(f"User: {row[0]}")
-                    st.text(f"Chatbot: {row[1]}")
-                    st.text(f"Timestamp: {row[2]}")
-                    st.markdown("---")
-        except FileNotFoundError:
-            st.write("No conversation history found.")
+        if os.path.exists("chat_log.csv"):
+            with open("chat_log.csv", "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                next(reader)
+                for row in reader:
+                    st.write(f"👤 {row[0]}")
+                    st.write(f"🤖 {row[1]}")
+                    st.caption(row[2])
+                    st.divider()
+        else:
+            st.info("No history available.")
 
+    # -------- ABOUT PAGE -------- 
     elif choice == "About":
         st.write(
             """
